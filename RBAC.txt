@@ -1,0 +1,176 @@
+USER.JS
+
+
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+// User Schema
+const UserSchema = new mongoose.Schema({
+  username: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  role: { type: String, required: true, enum: ['admin', 'moderator', 'user'], default: 'user' },
+});
+
+UserSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  this.password = await bcrypt.hash(this.password, 10);
+});
+
+UserSchema.methods.comparePassword = function(password) {
+  return bcrypt.compare(password, this.password);
+};
+
+module.exports = mongoose.model('User', UserSchema);
+
+
+Role Model (role.js)
+
+
+const mongoose = require('mongoose');
+
+// Role Schema
+const RoleSchema = new mongoose.Schema({
+  name: { type: String, required: true, enum: ['admin', 'moderator', 'user'] },
+  permissions: { type: [String], default: ['read'] },  // Permissions: read, write, delete
+});
+
+module.exports = mongoose.model('Role', RoleSchema);
+
+
+
+Create JWT Middleware
+JWT Middleware (authMiddleware.js)
+
+
+
+const jwt = require('jsonwebtoken');
+const User = require('./models/user');
+
+// Verify JWT and extract user from token
+const authenticateJWT = async (req, res, next) => {
+  const token = req.header('Authorization')?.replace('Bearer ', '');
+
+  if (!token) {
+    return res.status(401).json({ message: 'No token provided' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.userId);
+    if (!user) {
+      return res.status(401).json({ message: 'User not found' });
+    }
+    req.user = user;
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: 'Invalid or expired token' });
+  }
+};
+
+const authorizeRoles = (roles) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    next();
+  };
+};
+
+module.exports = { authenticateJWT, authorizeRoles };
+
+
+Create Routes for Authentication and Authorization
+Auth Routes (auth.js)
+
+
+
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const User = require('./models/user');
+const Role = require('./models/role');
+const { authenticateJWT, authorizeRoles } = require('./middleware/authMiddleware');
+
+const router = express.Router();
+
+// Register route
+router.post('/register', async (req, res) => {
+  const { username, email, password, role } = req.body;
+
+  // Check if role is valid
+  const validRoles = ['admin', 'moderator', 'user'];
+  if (!validRoles.includes(role)) {
+    return res.status(400).json({ message: 'Invalid role' });
+  }
+
+  const user = new User({ username, email, password, role });
+  await user.save();
+
+  res.status(201).json({ message: 'User registered successfully' });
+});
+
+// Login route
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  const user = await User.findOne({ email });
+  if (!user || !(await user.comparePassword(password))) {
+    return res.status(401).json({ message: 'Invalid credentials' });
+  }
+
+  const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+  res.json({ token });
+});
+
+// Protected route with RBAC
+router.get('/admin', authenticateJWT, authorizeRoles(['admin']), (req, res) => {
+  res.send('Welcome, Admin!');
+});
+
+router.get('/moderator', authenticateJWT, authorizeRoles(['admin', 'moderator']), (req, res) => {
+  res.send('Welcome, Moderator!');
+});
+
+router.get('/user', authenticateJWT, authorizeRoles(['admin', 'moderator', 'user']), (req, res) => {
+  res.send('Welcome, User!');
+});
+
+module.exports = router;
+
+
+
+Set Up the Server
+Server Setup (app.js)
+
+
+
+const express = require('express');
+const mongoose = require('mongoose');
+const dotenv = require('dotenv');
+const authRoutes = require('./auth');
+
+dotenv.config();
+const app = express();
+
+// Middleware
+app.use(express.json());
+
+// Connect to MongoDB
+mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+
+// Routes
+app.use('/auth', authRoutes);
+
+// Server start
+app.listen(3000, () => {
+  console.log('Server is running on port 3000');
+});
+
+
+
+Testing the System
+Register a user with a role.
+Login and retrieve the JWT.
+Use the JWT to access protected routes based on the user’s role.
+Test that the Admin can access all routes, the Moderator can access limited routes, and the User can access only their own.
